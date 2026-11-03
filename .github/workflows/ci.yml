@@ -1,0 +1,52 @@
+name: All Packages (latest)
+# Stands in for the ci.yml of MRIReco.jl: the same name, triggers, concurrency and upload step, with
+# a copy instead of the Julia build and a plain push instead of Documenter's deploy.
+on:
+  pull_request:
+    branches:
+      - master
+  push:
+    branches:
+      - master
+      - '*'
+    tags: '*'
+jobs:
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    # Documenter's deploy and the documentation previews push to gh-pages one at a time
+    concurrency:
+      group: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && 'gh-pages' || github.run_id }}
+      queue: max
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Build the documentation (stands in for docs/make.jl)
+        run: |
+          sleep 60
+          cp -R docs/src docs/build
+          echo "$GITHUB_SHA" > docs/build/build.txt
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        with:
+          ref: gh-pages
+          path: pages
+      - name: Deploy the documentation (stands in for deploydocs)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        working-directory: pages
+        run: |
+          rm -rf dev
+          cp -R ../docs/build dev
+          git add -A dev
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "build based on $GITHUB_SHA"
+          git push -q origin HEAD:gh-pages
+      - name: Upload the documentation build for pull requests
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: documentation
+          path: docs/build
+          retention-days: 14
