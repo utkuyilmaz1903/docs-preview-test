@@ -1,22 +1,20 @@
 name: Documentation Preview
 
 # Publishes the documentation that "All Packages (latest)" builds for a pull request to
-# previews/PR<number>/ on gh-pages, links it in a comment and deletes it when the pull request is
-# closed. It only copies the uploaded build and never runs code from the pull request, so it also
-# works for pull requests from forks.
+# previews/PR<number>/ on gh-pages and links it in a comment, and deletes the previews of closed
+# pull requests. It only copies the uploaded build and never runs code from the pull request, so it
+# also works for pull requests from forks.
 on:
   workflow_run:
     workflows: ["All Packages (latest)"]
     types: [completed]
-  pull_request_target:
-    types: [closed]
 
 permissions: {}
 
 jobs:
   publish:
     name: Publish the preview
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request'
+    if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -128,29 +126,52 @@ jobs:
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment" -f body="$body" > /dev/null
           fi
 
+  # pull_request_target, which closing a pull request triggers, is blocked by default in public
+  # repositories from December 2026, so the previews are deleted after the next run of the CI
   delete:
-    name: Delete the preview
-    if: github.event_name == 'pull_request_target'
+    name: Delete the previews of closed pull requests
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
     concurrency:
       group: gh-pages
       queue: max
     steps:
+      - name: Find the previews of closed pull requests
+        id: closed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tree=$(gh api "repos/$GITHUB_REPOSITORY/git/trees/gh-pages" --jq '.tree[] | select(.path == "previews") | .sha')
+          if [ -z "$tree" ]; then
+            exit 0
+          fi
+          previews=$(gh api "repos/$GITHUB_REPOSITORY/git/trees/$tree" \
+                       --jq '.tree[] | select(.type == "tree" and (.path | test("^PR[0-9]+$"))) | .path')
+          {
+            echo "paths<<EOF"
+            for preview in $previews; do
+              if [ "$(gh api "repos/$GITHUB_REPOSITORY/pulls/${preview#PR}" --jq .state)" = closed ]; then
+                echo "previews/$preview"
+              fi
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: steps.closed.outputs.paths != ''
         with:
           ref: gh-pages
-          sparse-checkout: previews/PR${{ github.event.pull_request.number }}
+          sparse-checkout: ${{ steps.closed.outputs.paths }}
 
-      - name: Delete the preview from gh-pages
+      - name: Delete them from gh-pages
+        if: steps.closed.outputs.paths != ''
         env:
-          NUMBER: ${{ github.event.pull_request.number }}
+          PREVIEWS: ${{ steps.closed.outputs.paths }}
         run: |
-          if [ -d "previews/PR$NUMBER" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git rm -r -q "previews/PR$NUMBER"
-            git commit -q -m "Delete the documentation preview of pull request $NUMBER"
-            git push -q origin HEAD:gh-pages
-          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -r -q $PREVIEWS
+          git commit -q -m "Delete the documentation previews of closed pull requests"
+          git push -q origin HEAD:gh-pages
