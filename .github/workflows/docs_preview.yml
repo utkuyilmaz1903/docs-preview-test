@@ -15,7 +15,7 @@ permissions: {}
 jobs:
   publish:
     name: Publish the preview
-    if: github.repository == 'MagneticResonanceImaging/MRIReco.jl' && github.event.workflow_run.event == 'pull_request'
+    if: github.repository == 'utkuyilmaz1903/docs-preview-test' && github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -127,7 +127,7 @@ jobs:
   # when this workflow is run by hand
   delete:
     name: Delete the previews of closed pull requests
-    if: github.repository == 'MagneticResonanceImaging/MRIReco.jl'
+    if: github.repository == 'utkuyilmaz1903/docs-preview-test'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
