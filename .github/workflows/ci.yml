@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Build the documentation (stands in for docs/make.jl)
         run: |
-          sleep 60
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/master ]; then sleep 180; else sleep 30; fi
           cp -R docs/src docs/build
           echo "$GITHUB_SHA" > docs/build/build.txt
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
