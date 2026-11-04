@@ -8,14 +8,16 @@ on:
   workflow_run:
     workflows: ["All Packages (latest)"]
     types: [completed]
+  workflow_dispatch:
 
 permissions: {}
 
 jobs:
   publish:
     name: Publish the preview
-    if: github.event.workflow_run.event == 'pull_request'
+    if: github.repository == 'MagneticResonanceImaging/MRIReco.jl' && github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       actions: read
       contents: write
@@ -29,39 +31,31 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
-          NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
           HEAD: ${{ github.event.workflow_run.head_repository.owner.login }}:${{ github.event.workflow_run.head_branch }}
           SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          # Runs of pull requests from forks don't list their pull request
-          if [ -z "$NUMBER" ]; then
-            NUMBER=$(gh api -X GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$HEAD" \
-                       --jq 'map(select(.head.sha == env.SHA))[0].number // empty')
-          fi
-          if [ -z "$NUMBER" ]; then
+          number=$(gh api -X GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f base=master -f head="$HEAD" \
+                     --jq 'map(select(.head.sha == env.SHA))[0].number // empty')
+          if [ -z "$number" ]; then
             echo "No open pull request for $HEAD at $SHA"
             exit 0
           fi
-          state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" --jq '.state + " " + .head.sha')
-          if [ "$state" != "open $SHA" ]; then
-            echo "#$NUMBER is closed or has newer commits"
-            exit 0
-          fi
-          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/files" --jq '.[].filename')
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$number/files" --jq '.[].filename')
           if ! grep -q -E '^(docs/|CONTRIBUTING\.md$)' <<< "$files"; then
-            echo "#$NUMBER doesn't change the documentation"
+            echo "#$number doesn't change the documentation"
             exit 0
           fi
           artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
                        --jq '.artifacts[] | select(.name == "documentation" and (.expired | not)) | .id')
           if [ -z "$artifact" ]; then
-            echo "The documentation of #$NUMBER wasn't built"
+            echo "The documentation of #$number wasn't built"
             exit 0
           fi
-          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
 
       - name: Download and check the documentation
+        id: build
         if: steps.pr.outputs.number != ''
         working-directory: ${{ runner.temp }}
         env:
@@ -69,28 +63,24 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name documentation --dir documentation
-          # The build comes from the pull request, so only plain output like Documenter's is published
-          if [ "$(du -sm documentation | cut -f1)" -gt 100 ] || [ -n "$(find documentation -name .git)" ]; then
-            echo "::error::The documentation build is larger than 100 MB or contains .git"
-            exit 1
-          fi
-          # GitHub Pages builds gh-pages with Jekyll, which renders Markdown files and files with front
-          # matter, and a broken one would stop the deployment of the whole site
-          rendered=$(find documentation \( -iname '*.md' -o -iname '*.markdown' -o -type f -size +0 \
-                       -exec awk 'NR == 1 { exit !/^---[[:space:]]*$/ }' {} \; \) -print)
-          if [ -n "$rendered" ]; then
-            echo "::error::The documentation build contains files that Jekyll would render: $rendered"
-            exit 1
+          # The build comes from the pull request, so only plain output like Documenter's is published.
+          # GitHub Pages builds gh-pages with Jekyll, which renders Markdown files, files with front
+          # matter and _posts folders, and a broken one would stop the deployment of the whole site.
+          unusual=$(find documentation \( -name .git -o -name _posts -o -iname '*.md' -o -iname '*.markdown' \
+                      -o -iname '*.mkd' -o -iname '*.mkdn' -o -iname '*.mkdown' -o -type f -size +0 \
+                      -exec awk 'NR == 1 { exit !/^---[[:space:]]*$/ }' {} \; \) -print)
+          if [ "$(du -sm documentation | cut -f1)" -gt 50 ] || [ -n "$unusual" ]; then
+            echo "refused=true" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        if: steps.pr.outputs.number != ''
+        if: steps.pr.outputs.number != '' && steps.build.outputs.refused != 'true'
         with:
           ref: gh-pages
           sparse-checkout: previews/PR${{ steps.pr.outputs.number }}
 
       - name: Push the preview to gh-pages
-        if: steps.pr.outputs.number != ''
+        if: steps.pr.outputs.number != '' && steps.build.outputs.refused != 'true'
         env:
           NUMBER: ${{ steps.pr.outputs.number }}
           SHA: ${{ github.event.workflow_run.head_sha }}
@@ -106,20 +96,26 @@ jobs:
             git push -q origin HEAD:gh-pages
           fi
 
-      - name: Link the preview in the pull request
+      - name: Comment on the pull request
         if: steps.pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ steps.pr.outputs.number }}
           SHA: ${{ github.event.workflow_run.head_sha }}
+          REFUSED: ${{ steps.build.outputs.refused }}
           MARKER: "<!-- documentation preview -->"
         run: |
-          url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/previews/PR$NUMBER/"
+          if [ "$REFUSED" = true ]; then
+            text="No documentation preview for ${SHA:0:7}: the build is larger than 50 MB or contains .git, _posts, Markdown files or files with front matter."
+          else
+            url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY#*/}/previews/PR$NUMBER/"
+            text="Documentation preview: $url (built from ${SHA:0:7})"
+          fi
           body="$MARKER
-          Documentation preview: $url (built from ${SHA:0:7})"
-          comment=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                      --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith(env.MARKER))) | .id' |
-                      head -n 1)
+          $text"
+          comments=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                       --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith(env.MARKER))) | .id')
+          read -r comment <<< "$comments"
           if [ -z "$comment" ]; then
             gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" -f body="$body" > /dev/null
           else
@@ -127,10 +123,13 @@ jobs:
           fi
 
   # pull_request_target, which closing a pull request triggers, is blocked by default in public
-  # repositories from December 2026, so the previews are deleted after the next run of the CI
+  # repositories from December 2026, so the previews are deleted after the next run of the CI or
+  # when this workflow is run by hand
   delete:
     name: Delete the previews of closed pull requests
+    if: github.repository == 'MagneticResonanceImaging/MRIReco.jl'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: read
